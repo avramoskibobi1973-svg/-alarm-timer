@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#4C1D95">
-    <title>40-Minute Synced Alarm</title>
+    <title>40-Min Alarm - Cross-Device Sync</title>
     <style>
         * {
             margin: 0;
@@ -50,6 +50,10 @@
             align-items: center;
             gap: 5px;
             animation: pulse-badge 2s infinite;
+        }
+        
+        .sync-badge.offline {
+            background: rgba(239, 68, 68, 0.9);
         }
         
         @keyframes pulse-badge {
@@ -369,9 +373,9 @@
             opacity: 1;
         }
         
-        .device-info {
+        .device-count {
             font-size: 11px;
-            opacity: 0.7;
+            opacity: 0.8;
             margin-top: 5px;
         }
         
@@ -405,15 +409,15 @@
             <div class="warning-icon">⚠️</div>
             <div class="warning-title">WARNING!</div>
             <div class="warning-message">Only 2 minutes remaining!</div>
-            <div class="warning-sub">Get ready to complete your task</div>
+            <div class="warning-sub">Alert on ALL your devices</div>
             <button class="btn-dismiss" onclick="dismissWarning()">Got it!</button>
         </div>
     </div>
 
     <div class="app-container">
-        <div class="sync-badge">
+        <div class="sync-badge" id="syncBadge">
             <div class="sync-dot"></div>
-            <span>SYNCED</span>
+            <span id="syncStatus">SYNCED</span>
         </div>
         
         <button class="fullscreen-btn" onclick="toggleFullscreen()" title="Toggle Fullscreen">
@@ -424,7 +428,7 @@
 
         <div class="header">
             <h1>🔔 Alarm Counter</h1>
-            <p>40-Minute Synced Timer</p>
+            <p>Cross-Device Synced Timer</p>
         </div>
 
         <div class="current-time-box">
@@ -467,119 +471,134 @@
         </div>
         
         <div class="info-box sync-info">
-            🔄 Syncs across all your devices in real-time
-            <div class="device-info" id="deviceInfo">Connected devices: 1</div>
+            🌐 Real-time sync across ALL devices
+            <div class="device-count" id="deviceCount">Active devices: 1</div>
         </div>
     </div>
 
+    <!-- Firebase SDK -->
     <script type="module">
+        // FIREBASE CONFIGURATION
+        // Replace these with your Firebase project credentials
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY_HERE",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Check if Firebase is configured
+        const isConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY_HERE";
+
+        // For demo purposes without Firebase, use localStorage sync
+        let db = null;
+        let dbRef = null;
+
+        if (isConfigured) {
+            // Import Firebase (will only work if config is set)
+            const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js');
+            const { getDatabase, ref, set, onValue, get } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js');
+            
+            const app = initializeApp(firebaseConfig);
+            db = getDatabase(app);
+            dbRef = ref(db, 'timerState');
+            
+            document.getElementById('syncStatus').textContent = 'CLOUD SYNC';
+        } else {
+            document.getElementById('syncBadge').classList.add('offline');
+            document.getElementById('syncStatus').textContent = 'LOCAL';
+        }
+
         // Generate unique device ID
         const DEVICE_ID = localStorage.getItem('deviceId') || 'device_' + Math.random().toString(36).substr(2, 9);
         localStorage.setItem('deviceId', DEVICE_ID);
 
-        // Sync configuration
-        const SYNC_KEY = 'alarm_timer_sync';
-        const SYNC_INTERVAL = 500; // Check for updates every 500ms
-        
         let isActive = false;
         let timeLeft = 40 * 60;
         let warningShown = false;
         let localInterval = null;
         let wakeLock = null;
-        let lastSyncTime = Date.now();
 
         const TOTAL_TIME = 40 * 60;
         const WARNING_TIME = 120;
         const CIRCLE_CIRCUMFERENCE = 2 * Math.PI * 85;
-
-        // BroadcastChannel for same-device sync (multiple tabs)
-        const channel = new BroadcastChannel('timer_sync');
 
         // Request notification permission
         if ('Notification' in window && Notification.permission === 'default') {
             Notification.requestPermission();
         }
 
-        // Cloud sync using localStorage + polling
-        // For cross-device sync, this would connect to Firebase or similar
-        function saveState() {
-            const state = {
-                isActive,
-                timeLeft,
-                warningShown,
-                lastUpdate: Date.now(),
-                deviceId: DEVICE_ID,
-                startTime: isActive ? (Date.now() - (TOTAL_TIME - timeLeft) * 1000) : null
-            };
-            
-            localStorage.setItem(SYNC_KEY, JSON.stringify(state));
-            
-            // Broadcast to other tabs on same device
-            channel.postMessage(state);
+        async function saveToCloud(state) {
+            if (isConfigured && db) {
+                const { ref, set } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js');
+                const dbRef = ref(db, 'timerState');
+                await set(dbRef, state);
+            } else {
+                // Fallback to localStorage
+                localStorage.setItem('timerState', JSON.stringify(state));
+            }
         }
 
-        function loadState() {
-            const saved = localStorage.getItem(SYNC_KEY);
-            if (saved) {
-                try {
-                    const state = JSON.parse(saved);
-                    
-                    // If timer is active, calculate current time based on start time
-                    if (state.isActive && state.startTime) {
-                        const elapsed = Math.floor((Date.now() - state.startTime) / 1000);
-                        state.timeLeft = Math.max(0, TOTAL_TIME - elapsed);
+        async function loadFromCloud() {
+            if (isConfigured && db) {
+                const { ref, get } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js');
+                const dbRef = ref(db, 'timerState');
+                const snapshot = await get(dbRef);
+                return snapshot.exists() ? snapshot.val() : null;
+            } else {
+                // Fallback to localStorage
+                const saved = localStorage.getItem('timerState');
+                return saved ? JSON.parse(saved) : null;
+            }
+        }
+
+        async function listenToCloud() {
+            if (isConfigured && db) {
+                const { ref, onValue } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js');
+                const dbRef = ref(db, 'timerState');
+                onValue(dbRef, (snapshot) => {
+                    if (snapshot.exists()) {
+                        const state = snapshot.val();
+                        syncFromState(state);
                     }
-                    
-                    return state;
-                } catch (e) {
-                    console.error('Error loading state:', e);
-                }
-            }
-            return null;
-        }
-
-        function syncFromCloud() {
-            const cloudState = loadState();
-            if (cloudState && cloudState.deviceId !== DEVICE_ID) {
-                // Another device updated the timer
-                if (cloudState.lastUpdate > lastSyncTime) {
-                    isActive = cloudState.isActive;
-                    timeLeft = cloudState.timeLeft;
-                    warningShown = cloudState.warningShown;
-                    lastSyncTime = cloudState.lastUpdate;
-                    
-                    updateUI();
-                    
-                    if (isActive && !localInterval) {
-                        startLocalTimer();
-                    } else if (!isActive && localInterval) {
-                        stopLocalTimer();
-                    }
-                }
+                });
+            } else {
+                // Fallback: poll localStorage
+                setInterval(() => {
+                    const state = loadFromCloud();
+                    if (state) syncFromState(state);
+                }, 1000);
             }
         }
 
-        // Listen for updates from other tabs
-        channel.onmessage = (event) => {
-            const state = event.data;
-            if (state.deviceId !== DEVICE_ID) {
-                isActive = state.isActive;
-                timeLeft = state.timeLeft;
-                warningShown = state.warningShown;
-                lastSyncTime = Date.now();
-                
-                updateUI();
-                
-                if (isActive && !localInterval) {
-                    startLocalTimer();
-                } else if (!isActive && localInterval) {
-                    stopLocalTimer();
-                }
-            }
-        };
+        function syncFromState(state) {
+            if (!state || state.deviceId === DEVICE_ID) return;
 
-        // Sync every 500ms
-        setInterval(syncFromCloud, SYNC_INTERVAL);
+            if (state.isActive && state.startTime) {
+                const elapsed = Math.floor((Date.now() - state.startTime) / 1000);
+                state.timeLeft = Math.max(0, TOTAL_TIME - elapsed);
+            }
+
+            isActive = state.isActive;
+            timeLeft = state.timeLeft;
+            warningShown = state.warningShown || false;
+
+            updateUI();
+
+            if (isActive && !localInterval) {
+                startLocalTimer();
+            } else if (!isActive && localInterval) {
+                stopLocalTimer();
+            }
+
+            if (timeLeft <= WARNING_TIME && !warningShown) {
+                showWarning();
+                warningShown = true;
+            }
+        }
 
         function updateCurrentTime() {
             const now = new Date();
@@ -620,7 +639,6 @@
 
         function updateUI() {
             updateDisplay();
-            
             document.getElementById('startBtn').disabled = isActive;
             
             if (isActive) {
@@ -702,14 +720,13 @@
             
             requestWakeLock();
             
-            localInterval = setInterval(() => {
+            localInterval = setInterval(async () => {
                 if (timeLeft > 0) {
                     timeLeft--;
                     
                     if (timeLeft === WARNING_TIME && !warningShown) {
                         showWarning();
                         warningShown = true;
-                        saveState();
                     }
                     
                     if (timeLeft === 0) {
@@ -720,7 +737,7 @@
                         
                         if (Notification.permission === 'granted') {
                             new Notification('⏰ Timer Complete', {
-                                body: '40 minutes completed on all devices!',
+                                body: '40 minutes completed!',
                                 requireInteraction: true,
                                 tag: 'timer-complete'
                             });
@@ -730,15 +747,18 @@
                         timeLeft = TOTAL_TIME;
                         warningShown = false;
                         releaseWakeLock();
-                        saveState();
+                        
+                        await saveToCloud({
+                            isActive: false,
+                            timeLeft: TOTAL_TIME,
+                            warningShown: false,
+                            lastUpdate: Date.now(),
+                            deviceId: DEVICE_ID,
+                            startTime: null
+                        });
                     }
                     
                     updateDisplay();
-                    
-                    // Save state every second
-                    if (timeLeft % 5 === 0) {
-                        saveState();
-                    }
                 }
             }, 1000);
         }
@@ -751,19 +771,26 @@
             releaseWakeLock();
         }
 
-        function startTimer() {
+        async function startTimer() {
             if (isActive) return;
             
             isActive = true;
             warningShown = false;
-            lastSyncTime = Date.now();
             
             updateUI();
             startLocalTimer();
-            saveState();
+            
+            await saveToCloud({
+                isActive: true,
+                timeLeft: timeLeft,
+                warningShown: false,
+                lastUpdate: Date.now(),
+                deviceId: DEVICE_ID,
+                startTime: Date.now() - (TOTAL_TIME - timeLeft) * 1000
+            });
         }
 
-        function stopTimer() {
+        async function stopTimer() {
             stopLocalTimer();
             isActive = false;
             timeLeft = TOTAL_TIME;
@@ -771,7 +798,15 @@
             
             updateUI();
             dismissWarning();
-            saveState();
+            
+            await saveToCloud({
+                isActive: false,
+                timeLeft: TOTAL_TIME,
+                warningShown: false,
+                lastUpdate: Date.now(),
+                deviceId: DEVICE_ID,
+                startTime: null
+            });
         }
 
         function toggleFullscreen() {
@@ -786,17 +821,14 @@
         setInterval(updateCurrentTime, 1000);
         updateCurrentTime();
         
-        // Load saved state on startup
-        const savedState = loadState();
+        // Load saved state
+        const savedState = await loadFromCloud();
         if (savedState) {
-            isActive = savedState.isActive;
-            timeLeft = savedState.timeLeft;
-            warningShown = savedState.warningShown;
-            
-            if (isActive) {
-                startLocalTimer();
-            }
+            syncFromState(savedState);
         }
+        
+        // Listen for updates
+        listenToCloud();
         
         updateUI();
 
